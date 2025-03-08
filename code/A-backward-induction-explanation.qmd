@@ -1,0 +1,129 @@
+---
+title: Step-by-step explanations of the backward induction process
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    number-depth: 3
+---
+
+The first two chapters prepares for the detailed explanations that start at Chapter 3. 
+
+{{< include 0-setup-simulations.qmd >}}
+
+# Solve the dynamic optimization problem using backward induction
+
+
+The Bellman equation is written as follows:
+
+```{=tex}
+\begin{align}\label{bellman}
+ V_t^I (APH_t)=max_{x_t}\;\; & \int_3\big[U\big(R_t^I (APH_t)-w\cdot x_t \big)\big]f(y,p,hp|x_t)d\mathbf{z} \\
+ & +(1+\gamma)^{-1}\cdot \int[V_{t+1}^I (APH_{t+1})]h(y|x_t)dy \notag
+\end{align}
+```
+
+We solve the problem using backward induction for all $t$ ($t = 1, \dots, T$) starting from $t = T$. The solution to this problem is a function that maps APH to optimal N ($N^*$). That is, once APH value is known, then we can plug in its value to the function and obtain $N^*$. Numerically, we solve the above problem for each of the sequence of APH values. Such APH sequence is `APH_list`. 
+
+```{r}
+APH_list
+```
+
+In order to numerically solve the problem for a given value of APH (say, 100), we need to find the expected value of the concurrent profit (first term) and future profit (second term). 
+
+## Concurrent Profit/Final Period
+
+In order to find the expected value of the concurrent profit, we need to draw samples of yield and harvest price jointly, where yield is drawn from the Beta distibution and harvest price is drawn from log normal distribution.
+
+```{=tex}
+\begin{align}
+   h(y|N)=\frac{\Gamma[p(N)+q(N)]}{\Gamma[p(N)]\Gamma[q(N)]}\cdot \frac{(y-a)^{P(N)-1}(b-y)^{q(N)-1}}{b^{p(N)+q(N)-1}}
+\end{align}
+```
+
+$p(N)=3.14-0.0921\sqrt{N}+0.00603 N$, $q(N)=12.30-1.353\sqrt{N}+0.00456 N$, $a=48$, and $b=202$. 
+
+To achive this, we first create a sequence (10,000 realizations) of the **quantile** of yield that follows the uniform distribuion and harvest price that follows the log normal distribution. They are generated so that they are negatively correlated (check `Sigma` for the variance covariance matrix of the two variables).
+
+```{r}
+#--- number of iterations ---#
+B_bi <- 5000
+
+#--- generate price and yield in U() ---#
+half_U <- 
+  #--- bivariate normal ---#
+  rmvnorm(mean = c(0, 0), sig = sigma, n = B_bi) %>% 
+  #--- transform it so that both follow the uniform distribution [0, 1] ---#
+  pnorm()
+
+#--- join the 5000 drawn sample with their values flipped about 0.5 ---#
+# This is a simple technique to reduce the variance of the evntual outcomes to make the simulation results more reliable
+U <- rbind(half_U, 1 - half_U)
+```
+
+Here is what `U` looks like:
+
+```{r}
+head(U)
+```
+
+Note that they are indeed correlated:
+
+```{r}
+cor() 
+```
+
+```{r}
+h_price <- qlnorm(U[, 1], meanlog = ln_mean_p, sdlog = sqrt(ln_var_p))
+yield_U <- U[, 2] 
+```
+
+```{r}
+hist(h_price)
+```
+
+```{r}
+hist(yield_U)
+```
+
+
+
+```{r}
+yield_hprice_data <- data.table(yield = yield_U, h_price = h_price)
+```
+
+The nitrogen rates the farmer can choose from is stored in `N_seq`.
+
+```{r}
+N_seq
+```
+
+```{r}
+#--- generate yield, APH, and profit for all the yield-price instances ---#
+(
+V_c <-
+  mclapply(
+    1:APH_len,
+    \(x) find_VF(APH = APH_list[x]),
+    mc.cores = detectCores() - 4,
+    mc.preschedule = FALSE
+  ) %>%
+  rbindlist()
+)
+```
+
+We bound `APH_next` by `APH_min` and `APH_max`. Otherwise, you will expand the range of APH at every single time period.
+
+```{r}
+#--- update APH in the next period ---#
+V_c[APH_next <= APH_min, APH_next := APH_min]
+V_c[APH_next >= APH_max, APH_next := APH_max]
+```
+
+
+```{r}
+#--- APH evaluated at Bernstein bases ---#
+V_c[, APH_norm := (APH_next - APH_min) / (APH_max - APH_min)]
+APH_mat <- BernBasis_fast(V_c[, APH_norm], Nk)
+```

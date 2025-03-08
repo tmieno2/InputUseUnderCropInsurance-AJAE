@@ -1,0 +1,394 @@
+---
+title: Run backward induction and simulations
+---
+
+# Preparation
+
+## Load pacakges
+
+```{r}
+library("dplyr")
+library("parallel")
+library("data.table")
+library("mgcv")
+library("mc2d")
+library("Rcpp")
+library("quadprog")
+```
+
+## Load functions
+
+```{r}
+#--- crop insurance parameters and functions ---#
+source("code/R/premium_rate_adj.R")
+source("code/R/functions.R")
+
+#--- sourcing cpp simulation function ---#
+Rcpp::sourceCpp(here::here("code/R/profit_insured.cpp"))
+Rcpp::sourceCpp(here::here("code/R/BI.cpp"))
+
+source("code/R/find_opt_N_static.R")
+source("code/R/backward_induction_par.R")
+source("code/R/simulate_path_par.R")
+```
+
+## Crop insurance parameters
+
+Load crop-insurance parameters for Sioux county, IA.
+
+```{r}
+#--- county specific crop insurance parameters ---#
+source("code/R/Sioux_IA_parameters.R")
+```
+
+# Set parameters
+
+## Optimization/Simulation parameters
+
+### Cases considered
+
+```{r}
+#--- create lists of insurance and utility types ---#
+full_ui_pairs_ls <- data.table::CJ(
+  ins_type = c("YP", "RPHPE", "RP", "non"),
+  utility_type = c("RN", "CA1", "CA2", "CR")
+)
+
+ui_pairs_ls <- full_ui_pairs_ls[ins_type != "non", ]
+
+#--- coverage levels and their corresponding subsidy levels ---#
+coverage_subsidy_data <-
+  data.table(
+    coverage_level = c(0.70, 0.80, 0.85, 0.90),
+    subsidy_level = c(0.59, 0.48, 0.38, 0.28)
+  )
+```
+
+### Nitrogen rates
+
+```{r}
+N_min <- 0
+N_max <- 240
+N_seq <- seq(N_min, N_max, by = 2)
+
+search_increment <- 0.1
+search_N <- seq(N_min, N_max, by = search_increment)
+```
+
+### APH
+
+```{r}
+APH_min <- 100
+APH_max <- 160
+APH_list <- seq(APH_min, APH_max, by = 1)
+APH_len <- length(APH_list)
+```
+
+### Misc
+
+```{r}
+#--- total number of periods ---#
+T <- 50
+
+#--- Number of knots for Bernstein smoothing ---#
+Nk <- 5
+
+#--- Number of years to be used to calculate APH ---#
+n_window <- 10
+
+#--- current year ---#
+c_year <- 2016
+```
+
+### Production parameters
+
+```{r}
+#--- production acres (does not affect optimal N) ---#
+acres <- 100
+
+#--- crop function parameters ---#
+min_y <- 48
+max_y <- 202
+p_pars <- c(3.14, -0.0921, 0.00603)
+q_pars <- c(12.30, -1.353, 0.0456)
+```
+
+### Prices
+
+```{r}
+#--- mean and variance of the corn price ---#
+# do not use ln_var and ln_mean as they are used in premium calculation
+# parameters defined here are used for simulating the actual realization
+# of harvest price
+
+p_price <- 2.20 # projected price
+pvf <- 0.17535 # price volatility factor
+ln_var_p <- log(pvf^2 + 1)
+ln_mean_p <- log(p_price) - ln_var_p / 2
+hp_prop <- c(ln_mean_p, sqrt(ln_var_p))
+
+#--- N price ---#
+p_N <- 0.15 # ($/lb)
+
+#--- non-N costs (other costs) ---#
+other_cost <- 0 # ($/acre)
+
+#--------------------------
+# parameters of joint price-yield distribution
+#--------------------------
+rho <- -0.3 # correlation coefficient
+mu <- c(0, 0) # mean
+sigma <- matrix(c(1, rho, rho, 1), nrow = 2, ncol = 2) # covariance mat
+```
+
+## Insurance parameters for the Sioux County
+
+The codes below pack crop insurance parameters defined in **Sioux_IA_parameters.R** into multiple objects so that they can be used later in other functions. 
+
+```{r}
+c_rate_now <-
+  county_rate[year == c_year, list(reference_amount, exponent_value, reference_rate, fixed_rate)] %>%
+  unlist()
+
+c_rate_prev <-
+  county_rate[year == c_year - 1, list(reference_amount, exponent_value, reference_rate, fixed_rate)] %>%
+  unlist()
+
+c_pars <- c(
+  rate_differential_factor, py_rate_differential_factor,
+  unit_residual_factor, py_unit_residual_factor
+)
+
+beta_RP <- c(
+  beta_RP_0, beta_RP_1, beta_RP_2, beta_RP_3, beta_RP_4,
+  beta_RP_5, beta_RP_6, beta_RP_7, beta_RP_8, beta_RP_9,
+  beta_RP_10, beta_RP_11, beta_RP_12, beta_RP_13, beta_RP_14
+)
+
+beta_RPHPE <- c(
+  beta_RPHPE_0, beta_RPHPE_1, beta_RPHPE_2, beta_RPHPE_3, beta_RPHPE_4,
+  beta_RPHPE_5, beta_RPHPE_6, beta_RPHPE_7, beta_RPHPE_8, beta_RPHPE_9,
+  beta_RPHPE_10, beta_RPHPE_11, beta_RPHPE_12, beta_RPHPE_13, beta_RPHPE_14
+)
+
+sec5 <- c(mean_quantity, sd_quantity)
+
+sec6 <- c(
+  capping_reference_yield, py_capping_reference_yield,
+  capping_exponent_value, py_capping_exponent_value,
+  capping_reference_rate, py_capping_reference_rate,
+  capping_fixed_rate, py_capping_fixed_rate,
+  capping_year
+)
+
+county_TY <- 170
+```
+
+# Static simulation
+
+The code below finds the optimal level of N for a given level of APH under different coverage levels, insurance types, and utility types **without considering the dynamics of APH**. The solution is equivalent to the static optimization done by Babcock. This also corresponds to the optimal N level at the final period of the dynamic optimization, where the impact of N level on APH does not need to be considered.
+
+Set up the static optimization problem.
+
+```{r}
+#--- set seed ---#
+set.seed(4873)
+
+#--- number of simulation ---#
+B <- 50000
+```
+
+The code below loops over the coverage levels defined in `coverage_subsidy_data`. In each iteration, there is a loop over the value of APH defined in `APH_list`. In each of the inner loop, `find_opt_N_static()` finds the optimal level of N for the given level of APH under different coverage levels, insurance types, and utility types **without considering the dynamics of APH**. For each coverage level, the results stored in `VF_T_all` are saved as a single RDS file for later use. 
+
+`VF_T_all` has the following variables:
+
++ `APH`: APH
++ `uti_type`: utility type
++ `ins_type`: insurance type
++ `N_star`: optimal N
++ `max_pi`: profit/utility associated with `N_star`
++ `coverage`: coverage lvel
++ `p_corn`: price of corn
++ `p_N`: price of N
+
+
+```{r}
+cov_len <- nrow(coverage_subsidy_data)
+
+for (i in 1:cov_len) {
+  #--- set the coverage and subsidy level ---#
+  cov_level <- coverage_subsidy_data[i, coverage_level]
+  sub_per <- coverage_subsidy_data[i, subsidy_level]
+
+  #--- profress tracker ---#
+  print(paste0("Working on coverage level = ", cov_level))
+
+  #--- simulate ---#
+  VF_T_all <-
+    parallel::mclapply(
+      1:APH_len,
+      \(x) find_opt_N_static(APH = APH_list[x]),
+      mc.cores = parallel::detectCores() - 4,
+      mc.preschedule = FALSE
+    ) %>%
+    data.table::rbindlist() %>%
+    setkey(uti_type, ins_type, APH)
+
+  VF_T_all[, p_corn := p_price]
+  VF_T_all[, p_N := p_N]
+
+  #--- save optimal N (conditional on APH) ---#
+  saveRDS(
+    VF_T_all,
+    paste0(
+      "results/VF_T_all_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+      "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds"
+    )
+  )
+}
+```
+
+# Backward Induction
+
+In this step, the dynamic optimization problem is solved using backward induction.
+
+## Set parameters
+
+```{r}
+#--- number of iterations ---#
+B_bi <- 5000
+
+#--- discount rate ---#
+disc <- 0.04
+
+#--- generate price and yield in U() ---#
+half_U <- rmvnorm(mean = c(0, 0), sig = sigma, n = B_bi) %>% pnorm()
+U <- rbind(half_U, 1 - half_U)
+h_price <- qlnorm(U[, 1], meanlog = ln_mean_p, sdlog = sqrt(ln_var_p))
+yield_U <- U[, 2]
+```
+
+## Backward induction
+
+### Generate production data
+
+The code below generate yield, APH in the next period, and profit for all the yield-price instances (defined by `yield_U` and `h_price`) at different values of N (defined by `N_seq`).
+
+```{r}
+#--- generate yield, APH, and profit for all the yield-price instances ---#
+V_c <-
+  mclapply(
+    1:APH_len,
+    \(x) gen_yield_profit_APHnext(APH = APH_list[x]),
+    mc.cores = detectCores() - 4,
+    mc.preschedule = FALSE
+  ) %>%
+  rbindlist()
+```
+
+APH_next is bounded by APH_min and APH_max. Otherwise, you will expand the range of APH at every single time period.
+
+```{r}
+#--- update APH in the next period ---#
+V_c[APH_next <= APH_min, APH_next := APH_min]
+V_c[APH_next >= APH_max, APH_next := APH_max]
+```
+
+
+```{r}
+#--- APH evaluated at Bernstein bases ---#
+V_c[, APH_norm := (APH_next - APH_min) / (APH_max - APH_min)]
+APH_mat <- BernBasis_fast(V_c[, APH_norm], Nk)
+```
+
+### Backward induction
+
+```{r}
+for (i in 1:cov_len) {
+  #--- set the coverage and subsidy level ---#
+  cov_level <- coverage_subsidy_data[i, coverage_level]
+  sub_per <- coverage_subsidy_data[i, subsidy_level]
+
+  #++++++++++++++++++++++++++++++++++++
+  #+ Import the 1st stage results (solution to the static problem at t = T)
+  #++++++++++++++++++++++++++++++++++++
+  # VF_T is the value function that maps APH at t = T to profit/utility
+  VF_T <- readRDS(paste("./results/VF_T_all_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))[ins_type != "non", ]
+  VF_T[, ins_type := factor(ins_type, levels = c("YP", "RPHPE", "RP"))]
+
+  #++++++++++++++++++++++++++++++++++++
+  #+ Backward induction
+  #++++++++++++++++++++++++++++++++++++
+  BI_results <-
+    mclapply(
+      1:nrow(ui_pairs_ls),
+      BI,
+      mc.cores = min(nrow(ui_pairs_ls), detectCores() - 4),
+      mc.preschedule = FALSE
+    )
+  
+  #++++++++++++++++++++++++++++++++++++
+  #+ Arrange and save the results
+  #++++++++++++++++++++++++++++++++++++
+  #--- arrange the results ---#
+  VF_path <- sapply(BI_results, "[", 1)
+  opt_N_path <- sapply(BI_results, "[", 2)
+  APH_cutoff <- sapply(BI_results, "[", 3)
+
+  #--- save results ---#
+  saveRDS(VF_path, paste("./Results2/VF_path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+  saveRDS(opt_N_path, paste("./Results2/opt_N_path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+  saveRDS(APH_cutoff, paste("./Results2/APH_cutoff_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+}
+```
+
+# 3rd stage: Simulate Expected Path of N and APH
+
+```{r}
+#--- specify the starting point ---#
+APH_0 <- 136.5 # starting APH
+
+#--- number of iterations for simulation ---#
+B_sim <- 50000
+
+for (i in 1:cov_len) {
+  #--- coverage level ---#
+  cov_level <- coverage_list[i]
+
+  #--- subsidy level ---#
+  sub_per <- subsidy_list[i]
+
+  #--- read BI results ---#
+  opt_N_path <- readRDS(paste("./Results2/opt_N_path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+  APH_cutoff <- readRDS(paste("./Results2/APH_cutoff_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+
+  #--- run simulation ---#
+  # path <- mclapply(1:ui_pairs_ls,sim_path,mc.cores=12) %>% rbindlist()
+  path <- mclapply(1:ui_pairs_ls, sim_path, mc.cores = 12) %>% rbindlist()
+
+  #--- save the results ---#
+  saveRDS(path, paste("./Results2/path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+}
+
+```
