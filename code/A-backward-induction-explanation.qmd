@@ -58,7 +58,7 @@ half_U <-
   pnorm()
 
 #--- join the 5000 drawn sample with their values flipped about 0.5 ---#
-# This is a simple technique to reduce the variance of the evntual outcomes to make the simulation results more reliable
+# This is a simple technique to reduce the variance of the eventual outcomes to make the simulation results more reliable
 U <- rbind(half_U, 1 - half_U)
 ```
 

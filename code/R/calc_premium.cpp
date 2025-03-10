@@ -65,6 +65,7 @@ arma::vec loss_simu_RP(
   return sim_results;
 }
 
+// [[Rcpp::export]]
 double premium_calc_YP(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
@@ -213,6 +214,7 @@ double premium_calc_YP(
   return premium;
 }
 
+// [[Rcpp::export]]
 double premium_calc_RPHPE(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
@@ -468,6 +470,7 @@ double premium_calc_RPHPE(
   return premium;
 }
 
+// [[Rcpp::export]]
 double premium_calc_RP(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
@@ -721,106 +724,4 @@ double premium_calc_RP(
   double premium = total_premium_amount - subsidy_amount;
 
   return premium;
-}
-
-//===================================
-// Simulation
-//===================================
-// [[Rcpp::export]]
-List sim_for_BI(
-    NumericVector yield_unif, NumericVector hp, double APH, arma::vec N_list,
-    int N_len, double N_price, double rate_yield, int B, double max_y,
-    double min_y, arma::vec p_pars, arma::vec q_pars, double acres, double cov_level,
-    double pp, double pvf, double subsidy_percent, int year, double county_TY, arma::vec c_rate_now,
-    arma::vec c_rate_prev, arma::vec c_pars, arma::vec beta_RPHPE, arma::vec beta_RP, arma::vec sec5, arma::vec sec6,
-    double n_window)
-{
-
-  NumericVector profit_YP(N_len * B);
-  NumericVector profit_RPHPE(N_len * B);
-  NumericVector profit_RP(N_len * B);
-  NumericVector APH_next_store(N_len * B);
-
-  //===================================
-  // calculate premium for the current APH
-  //===================================
-  //--- YP ---//
-  double premium_YP = premium_calc_YP(
-      rate_yield, APH, cov_level, subsidy_percent, pp,
-      pvf, acres, county_TY, year, c_rate_now, c_rate_prev,
-      c_pars);
-
-  //--- RPHPE ---//
-  double premium_RPHPE = premium_calc_RPHPE(
-      rate_yield, APH, cov_level, subsidy_percent, pp,
-      pvf, acres, county_TY, year, c_rate_now, c_rate_prev,
-      c_pars, beta_RPHPE, sec5, sec6);
-
-  //--- RP ---//
-  double premium_RP = premium_calc_RP(
-      rate_yield, APH, cov_level, subsidy_percent, pp,
-      pvf, acres, county_TY, year, c_rate_now, c_rate_prev,
-      c_pars, beta_RP, sec5, sec6);
-
-  for (int j = 0; j < N_len; j++)
-  {
-    double N = N_list[j];
-    double N_cost = N * N_price * acres;
-    double p_N = p_pars[0] + p_pars[1] * sqrt(N) + p_pars[2] * N;
-    double q_N = q_pars[0] + q_pars[1] * sqrt(N) + q_pars[2] * N;
-
-    //------------------
-    // yield generation
-    //------------------
-    NumericVector yield_temp = qbeta(yield_unif, p_N, q_N);
-    NumericVector yield = yield_temp * (max_y - min_y) + min_y;
-
-    //------------------
-    // APH
-    //------------------
-    NumericVector APH_next = yield / n_window + (n_window - 1) * APH / n_window;
-
-    //===================================
-    // Revenue and Profit (with or without insurance)
-    //===================================
-    //--- raw revenue ---//
-    NumericVector raw_revenue = hp * yield * acres;
-
-    //------------------
-    // Revenue with indemnity
-    //------------------
-    //--- revenue with indemnity payment under YP (BH) ---//
-    NumericVector revenue_YP = raw_revenue + pmax(0, pp * (APH * cov_level - yield) * acres);
-
-    //--- revenue with indemnity payment under RP (BH) ---//
-    NumericVector revenue_RPHPE = pmax(raw_revenue, APH * cov_level * acres * pp);
-
-    //--- revenue with indemnity payment under RP (MWF) ---//
-    NumericVector revenue_RP = pmax(raw_revenue, pmax(hp, pp) * APH * cov_level * acres);
-
-    //------------------
-    // Profit
-    //------------------
-    NumericVector pi_temp_yp = revenue_YP - N_cost - premium_YP;
-    NumericVector pi_temp_rphpe = revenue_RPHPE - N_cost - premium_RPHPE;
-    NumericVector pi_temp_rp = revenue_RP - N_cost - premium_RP;
-
-    double start_ind = j * B;
-
-    //--- fill the data ---//
-    for (int k = 0; k < B; k++)
-    {
-      profit_YP[start_ind + k] = pi_temp_yp[k];       // premium is fixed
-      profit_RPHPE[start_ind + k] = pi_temp_rphpe[k]; // premium is fixed
-      profit_RP[start_ind + k] = pi_temp_rp[k];       // premium is fixed
-      APH_next_store[start_ind + k] = APH_next[k];    // premium is fixed
-    }
-
-  } // end of loop over N
-
-  return Rcpp::List::create(
-      Rcpp::Named("pi_YP") = profit_YP,
-      Rcpp::Named("pi_RPHPE") = profit_RPHPE,
-      Rcpp::Named("pi_RP") = profit_RP,
-      Rcpp::Named("APH_next") = APH_next_store);
 }
