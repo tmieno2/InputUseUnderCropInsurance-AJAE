@@ -66,7 +66,7 @@ arma::vec loss_simu_RP(
 }
 
 // [[Rcpp::export]]
-double premium_calc_YP(
+List premium_calc_YP(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
     arma::vec c_rate_now, arma::vec c_rate_prev, arma::vec c_pars)
@@ -211,11 +211,14 @@ double premium_calc_YP(
   //--- 9.07 (Producer premium amount) --//#
   double premium = total_premium_amount - subsidy_amount;
 
-  return premium;
+  return Rcpp::List::create(
+    Rcpp::Named("premium") = premium,
+    Rcpp::Named("premium_rate") = premium_rate
+  );
 }
 
 // [[Rcpp::export]]
-double premium_calc_RPHPE(
+List premium_calc_RPHPE(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
     arma::vec c_rate_now, arma::vec c_rate_prev, arma::vec c_pars,
@@ -467,11 +470,14 @@ double premium_calc_RPHPE(
   //--- 9.07 (Producer premium amount) --//#
   double premium = total_premium_amount - subsidy_amount;
 
-  return premium;
+  return Rcpp::List::create(
+    Rcpp::Named("premium") = premium,
+    Rcpp::Named("premium_rate") = premium_rate
+  );
 }
 
 // [[Rcpp::export]]
-double premium_calc_RP(
+List premium_calc_RP(
     double rate_yield, double APH, double cov_level, double subsidy_percent,
     double proj_price, double pvf, double acres, double county_rate, int year,
     arma::vec c_rate_now, arma::vec c_rate_prev, arma::vec c_pars,
@@ -723,5 +729,8 @@ double premium_calc_RP(
   //--- 9.07 (Producer premium amount) --//#
   double premium = total_premium_amount - subsidy_amount;
 
-  return premium;
+  return Rcpp::List::create(
+    Rcpp::Named("premium") = premium,
+    Rcpp::Named("premium_rate") = premium_rate
+  );
 }

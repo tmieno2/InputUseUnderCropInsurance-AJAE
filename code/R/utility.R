@@ -40,6 +40,28 @@ find_opt_N_by_gam <- function(data, dep_var = "value", N_seq_for_search_ls) {
   return(pi_data)
 }
 
+smooth_premium <- function(data) {
+  #++++++++++++++++++++++++++++++++++++
+  #+ Premium
+  #++++++++++++++++++++++++++++++++++++
+  premium_smooth_gam <- gam(premium ~ s(APH, k = 3), data = data)
+
+  premium_smoothed <- predict(premium_smooth_gam, data.frame(APH = data$APH)) 
+
+  data$premium <- premium_smoothed
+  
+  #++++++++++++++++++++++++++++++++++++
+  #+ Premium rate
+  #++++++++++++++++++++++++++++++++++++
+  premium_rate_smooth_gam <- gam(premium_rate ~ s(APH, k = 3), data = data)
+
+  premium_rate_smoothed <- predict(premium_smooth_gam, data.frame(APH = data$APH)) 
+
+  data$premium_rate <- premium_rate_smoothed
+
+  return(data)
+}
+
 # !===========================================================
 # ! Generate yield-hprice data
 # !===========================================================

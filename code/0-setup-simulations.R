@@ -1,8 +1,4 @@
-# Preparation
-
-## Load pacakges
-
-```{r}
+## -------------------------------------------------
 library("dplyr")
 library("parallel")
 library("data.table")
@@ -10,37 +6,22 @@ library("mgcv")
 library("mc2d")
 library("Rcpp")
 library("quadprog")
-```
 
-## Load functions
 
-```{r}
+## -------------------------------------------------
 #--- crop insurance parameters and functions ---#
 source("code/R/utility.R")
 
 #--- sourcing cpp simulation function ---#
 Rcpp::sourceCpp(here::here("code/R/calc_premium.cpp"))
-```
 
-## Crop insurance parameters for Sioux County, IA 
 
-Load crop-insurance parameters for Sioux county, IA.
-
-```{r}
+## -------------------------------------------------
 #--- county specific crop insurance parameters ---#
 source("code/R/Sioux_IA_parameters.R")
-```
 
-# Set parameters
 
-## Optimization/Simulation parameters
-
-### Nitrogen rates
-
-`N_seq`: sequence of N rates at which yield will be generated
-`N_seq_for_search`: sequence of N rates used for grid search in trying to identify the optimal N rate
-
-```{r}
+## -------------------------------------------------
 N_min <- 0
 N_max <- 240
 N_seq <- seq(N_min, N_max, by = 2)
@@ -55,15 +36,9 @@ N_data <-
     N_seq = N_seq,
     N_seq_for_search = N_seq_for_search
   )
-```
 
-### APH
 
-+ `APH_list`: sequence of APH value at which 
-  + profit is calculated under various types of crop insurance programs
-  + optimal N is found
-
-```{r}
+## -------------------------------------------------
 APH_min <- 100
 APH_max <- 160
 APH_list <- seq(APH_min, APH_max, by = 1)
@@ -74,11 +49,9 @@ APH_data <-
     APH_max = APH_max,
     APH_list = APH_list
   )
-```
 
-### Production parameters
 
-```{r}
+## -------------------------------------------------
 prod_data <-
   list(
     #--- production acres (does not affect optimal N) ---#
@@ -89,11 +62,9 @@ prod_data <-
     p_pars = c(3.14, -0.0921, 0.00603),
     q_pars = c(12.30, -1.353, 0.0456)
   )
-```
 
-### Misc
 
-```{r}
+## -------------------------------------------------
 #--- total number of periods ---#
 T <- 50
 
@@ -105,11 +76,9 @@ n_window <- 10
 
 #--- discount rate ---#
 disc <- 0.04
-```
 
-## Prices
 
-```{r}
+## -------------------------------------------------
 #--- mean and variance of the corn price ---#
 # do not use ln_var and ln_mean as they are used in premium calculation
 # parameters defined here are used for simulating the actual realization
@@ -130,22 +99,15 @@ price_data <-
     p_N = 0.15, # N price ($/lb)
     other_cost = 0 # ($/acre)
   )
-```
 
 
-## Join distribution of yield and harvest price
-
-```{r}
+## -------------------------------------------------
 rho <- -0.3 # correlation coefficient
 mu <- c(0, 0) # mean
 sigma <- matrix(c(1, rho, rho, 1), nrow = 2, ncol = 2) # covariance mat
-```
 
-## Insurance parameters for the Sioux County
 
-The codes below pack crop insurance parameters defined in **Sioux_IA_parameters.R** into multiple objects so that they can be used later in other functions. 
-
-```{r}
+## -------------------------------------------------
 ci_data <-
   list(
     c_rate_now =
@@ -180,5 +142,4 @@ ci_data <-
     #--- current year ---#
     c_year = 2016
   )
-```
 

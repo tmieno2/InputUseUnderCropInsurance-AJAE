@@ -1,0 +1,614 @@
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(data.table)
+```
+
+# Figure 1: Indemnity trigger region
+
+```{r}
+APH <- 150
+cov_level <- 0.8
+pp <- 2
+N <- 1000
+
+hp_min <- 0.9
+hp_max <- 3
+data <- data.table(
+  hp = seq(hp_min, hp_max, length = N),
+  yield = seq(50, 250, length = N)
+)
+data[, y_rp_hpe := pp * APH * cov_level / yield]
+data[y_rp_hpe > hp_max, y_rp_hpe := hp_max]
+data[, y_rp := pmax(hp, pp) * APH * cov_level / yield]
+data[y_rp > hp_max, y_rp := hp_max]
+data[, y_yp := hp_max]
+
+cols <- c(
+  "B" = "blue",
+  "C" = "red",
+  "A" = "green"
+)
+
+cols_line <- c("Projected Price" = "black", "Coverage Level times APH" = "blue")
+
+(
+  g_trigger_area <-
+    ggplot() +
+    geom_ribbon(
+      data = data[yield < cov_level * APH & y_rp_hpe < hp_max, ],
+      aes(x = yield, ymin = y_rp_hpe, ymax = hp_max, fill = "A"),
+      alpha = 0.2, color = "black"
+    ) +
+    geom_ribbon(
+      data = data[yield < cov_level * APH, ],
+      aes(x = yield, ymin = hp_min, ymax = y_rp_hpe, fill = "B"),
+      alpha = 0.2, color = "black"
+    ) +
+    geom_ribbon(
+      data = data[yield > APH * cov_level, ],
+      aes(x = yield, ymin = hp_min, ymax = y_rp_hpe, fill = "C"),
+      alpha = 0.2, color = "black"
+    ) +
+    geom_line(data = data.table(y = seq(hp_min, 3, 0.1), x = 50), aes(y = y, x = x)) +
+    geom_line(data = data.table(y = seq(hp_min, 3, 0.1), x = 120), aes(y = y, x = x)) +
+    annotate("text", label = "A", x = 85, y = 1.8, size = 6, colour = "black", family = "Times") +
+    annotate("text", label = "B", x = 105, y = 2.7, size = 6, colour = "black", family = "Times") +
+    annotate("text", label = "C", x = 150, y = 1.25, size = 6, colour = "black", family = "Times") +
+    scale_fill_manual(values = cols, name = "") +
+    annotate("text", label = " YP = A+B\n RP-HPE = A+C \n RP = A+B+C", x = 170, y = 2.3, size = 4, colour = "black", hjust = 0, family = "Times") +
+    # annotate("text", label = expression(hp == 120 %*% pp / y), x = 200, y = 1.3, size = 4, colour = "black", hjust = 0, family = "Times") +
+    xlab("Realized Yield") +
+    ylab("Harvest Price ($/bushel)") +
+    scale_x_continuous(breaks = c(50, 100, 120, 150, 200, 250)) +
+    theme_bw() +
+    theme(
+      legend.position = "non",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+)
+```
+
+# Figures 2 and 3
+
+```{r}
+premium_data <-
+  readRDS("results/premium_data.rds") %>%
+  .[, insurance_type := factor(insurance_type, levels = c("YP", "RPHPE", "RP"))]
+```
+
+## Figure 2: Premium pyament amount (subsidized)
+
+```{r}
+ggplot(data = premium_data[coverage_level != 0.9, ]) +
+  geom_line(aes(y = premium, x = APH, color = factor(coverage_level))) +
+  facet_grid(. ~ insurance_type) +
+  scale_color_discrete(name = "Coverage rate") +
+  theme_bw() +
+  ylab("Premium ($/acre)") +
+  xlab("APH (bushel/acre)") +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+## Figure 3: Premium rate (subsidized)
+
+```{r}
+ggplot(data = premium_data[coverage_level != 0.9, ]) +
+  geom_line(aes(y = premium_rate * (1 - subsidy_level), x = APH, color = factor(coverage_level))) +
+  facet_grid(. ~ insurance_type) +
+  scale_color_discrete(name = "Coverage rate") +
+  theme_bw() +
+  ylab("Premium Rate ($/liability)") +
+  xlab("APH (bushel/acre)") +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+# Figures 4 and 5: Production Function
+
+## Figure 4
+
+```{r}
+production_data <- readRDS("results/production_data.rds")
+
+
+APH <- 130 # has no influence on the results
+rate_yield <- APH
+B <- 50000
+N_seq <- seq(0, 250, by = 1)
+N_len <- length(N_seq)
+cov_level <- 0.85
+sub_per <- 0.38
+sim <- sim_gen(min_y, max_y, p_price, p_N, pvf, APH, rate_yield)
+
+sim_results <- mclapply(1:N_len, sim, mc.cores = 6) %>%
+  rbindlist()
+
+#--- find mean, 10% and 90% of yield by N ---#
+data_yield <- 
+  production_data %>%
+  .[, .(
+    yield = mean(yield),
+    yield_10 = quantile(yield, prob = 0.1),
+    yield_90 = quantile(yield, prob = 0.90)
+  ),
+  by = N
+  ]
+
+#--- find fits ---#
+yield_gam <- gam(yield ~ s(N, k = 6), data = data_yield)
+yield_10_gam <- gam(yield_10 ~ s(N, k = 6), data = data_yield)
+yield_90_gam <- gam(yield_90 ~ s(N, k = 6), data = data_yield)
+
+#--- create data for plotting ---#
+data_plot <- data.table(N = seq(0, 230, length = 1000)) %>%
+  .[, yield := predict.gam(yield_gam, newdata = .)] %>%
+  .[, yield_10 := predict.gam(yield_10_gam, newdata = .)] %>%
+  .[, yield_90 := predict.gam(yield_90_gam, newdata = .)]
+
+#--- create the figure ---#
+(
+g_yield <- 
+  ggplot(data = data_plot) +
+  geom_ribbon(aes(x = N, ymin = yield_10, ymax = yield_90), fill = "gray", alpha = 0.4) +
+  geom_line(aes(x = N, y = yield)) +
+  xlab("Nitrogen rate (lb/acre)") +
+  ylab("Yield (bushel/acre)") +
+  scale_y_continuous(breaks = seq(60, 190, by = 10), limits = c(60, 190)) +
+  scale_x_continuous(breaks = seq(0, 230, by = 20)) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linetype = 2)
+  )
+)
+
+```
+
+# Figure 5: Yield density by N
+
+```{r}
+N_ls <- c(0, 50, 100, 200)
+sub_data <- 
+  production_data %>%
+  .[N %in% c(0, 50, 100, 200), ] %>%
+  .[, N_txt := paste("N=", N, sep = "")] %>%
+  .[, N_txt := factor(N_txt, levels = paste("N=", c(0, 50, 100, 200), sep = ""))]
+
+g_dens <- 
+  ggplot(data = sub_data) +
+  geom_density(aes(x = yield, fill = factor(N_txt)), alpha = 0.4, bw = 5) +
+  scale_fill_discrete(name = "Nitrogen Rate (lb/acre)") +
+  ylab("") +
+  xlab("Yield (bu/acre)") +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+# Figures 6: Optimal N choice (static)
+
+```{r}
+# cov_list <- c(0.70,0.80,0.85,0.90)
+cov_list <- c(0.70, 0.80, 0.85, 0.90)
+cov_len <- length(cov_list)
+subsidy_list <- c(0.59, 0.48, 0.38, 0.28) # subsidy level
+min_y <- 48
+max_y <- 202
+rho <- -0.3 # correlation coefficient
+
+EN_s_holder <- list()
+EN_d_holder <- list()
+
+for (i in 1:cov_len) {
+  #--------------------------
+  # specify parameters
+  #--------------------------
+  cov_level <- cov_list[i]
+  sub_per <- subsidy_list[i]
+
+  #--------------------------
+  # read the results
+  #--------------------------
+  VF_T_all <- readRDS(paste("./Results/VF_T_all_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+  EN_d_holder[[i]] <- readRDS(paste("./Results/path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+
+  #--------------------------
+  # Static
+  #--------------------------
+  data_holder <- list()
+  counter <- 0
+  for (j in 1:uti_len) {
+    for (k in 1:ins_len) {
+      counter <- counter + 1
+      data_temp <- VF_T_all[uti_type == utility_type[j] & ins_type == insurance_type[k], ]
+      gam_temp <- gam(N_star ~ s(APH, k = 6), data = data_temp)
+      data_temp[, EN_sm := gam_temp$fitted.values]
+      data_holder[[counter]] <- copy(data_temp)
+    }
+  }
+
+  s_data <- rbindlist(data_holder)
+  s_data[, coverage := cov_level]
+
+  EN_s_holder[[i]] <- s_data
+}
+
+EN_s <- rbindlist(EN_s_holder) %>%
+  mutate(type = "Static") %>%
+  data.table() %>%
+  setkey(APH, uti_type, ins_type)
+EN_d <- rbindlist(EN_d_holder) %>%
+  mutate(type = "Static") %>%
+  data.table()
+
+#--------------------------
+# Figure 6: Optimal N choice (Static)
+#--------------------------
+EN_s[ins_type == "RPHPE", ins_type := "RP-HPE"]
+EN_s[, ins_type := factor(ins_type, levels = c("YP", "RP-HPE", "RP", "non"))]
+EN_s[uti_type == "CA2", uti_type := "CA"]
+EN_s[, uti_type := factor(uti_type, levels = c("RN", "CA", "CR"))]
+
+plot_data <- filter(EN_s, ins_type != "non" & uti_type != "CA1" & coverage != 0.80)
+
+g_stat_N <- ggplot(data = plot_data, aes(x = APH, y = N_star, linetype = uti_type)) +
+  geom_line() +
+  geom_vline(xintercept = 136.5, linetype = 2, size = 0.4) +
+  facet_grid(coverage ~ ins_type) +
+  ylab("Optimal nitrogen rate (lb/acre)") +
+  xlab("APH") +
+  scale_y_continuous(breaks = 20 * (0:10)) +
+  scale_x_continuous(breaks = 10 * (10:16), limits = c(120, 160)) +
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"), name = "Utility Type") +
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(0.5, "lines")
+  )
+ggsave(paste("figures/N_static_", min_y, "_", max_y, "_rho_", abs(rho) * 10, ".pdf", sep = ""), height = 6, width = 6)
+
+```
+
+
+# Figure 7: Optimal N (dynamic)  
+
+```{r}
+# visualizer optimal nitrogen rate with respect to APH
+# for select time periods
+
+#--- create lists of insurance and utility types ---#
+insurance_type <- c("YP", "RPHPE", "RP", "non")
+ins_len <- length(insurance_type)
+utility_type <- c("RN", "CA1", "CA2", "CR")
+uti_len <- length(utility_type)
+ui_pairs_list <- expand.grid(utility_type, insurance_type[-4])
+ui_pairs_len <- dim(ui_pairs_list)[1]
+
+#--- coverage and subsidy list ---#
+cov_list <- c(0.70, 0.80, 0.85, 0.90)
+cov_len <- length(cov_list)
+subsidy_list <- c(0.59, 0.48, 0.38, 0.28) # subsidy level
+
+#--- periods at which optimal N functions are found ---#
+t_list <- c(1, 20, 30, 45, 49, 50)
+t_len <- length(t_list)
+
+opt_N_fun_holder <- list()
+
+#--- APH list ---#
+APH_ls <- seq(120, 160)
+APH_max <- max(APH_ls)
+
+for (i in 1:cov_len) {
+  #--------------------------
+  # specify parameters
+  #--------------------------
+  cov_level <- cov_list[i]
+  sub_per <- subsidy_list[i]
+
+  #--------------------------
+  # read the results
+  #--------------------------
+  opt_N_path <- readRDS(paste("./Results/opt_N_path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+  APH_cutoff <- readRDS(paste("./Results/APH_cutoff_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+    "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+    sep = ""
+  ))
+
+  store_2 <- list()
+  for (k in 1:ui_pairs_len) {
+    U_type <- ui_pairs_list[k, 1]
+    I_type <- ui_pairs_list[k, 2]
+
+    find_opt_N_fun <- function(j) {
+      period <- t_list[j]
+
+      aph_cutoff <- APH_cutoff[[k]][[T - period + 1]]
+      APH_ls_nonzero_N <- APH_ls[APH_ls <= aph_cutoff]
+      APH_ls_zero_N <- APH_ls[APH_ls > aph_cutoff]
+
+      #--- find optimal N ---#
+      temp_data <- predict.gam(opt_N_path[[k]][[T - period + 1]], newdata = data.table(APH = APH_ls_nonzero_N)) %>%
+        data.table() %>%
+        mutate(t = period, APH = APH_ls_nonzero_N)
+
+      if (aph_cutoff < APH_max) {
+        zero_N_data <- data.table(
+          V1 = 0,
+          t = period,
+          APH = APH_ls_zero_N
+        )
+        temp_data <- rbind(temp_data, zero_N_data)
+      }
+      setnames(temp_data, "V1", "N")
+      return(temp_data)
+    }
+    temp_opt_N_fun <- mclapply(1:t_len, find_opt_N_fun, mc.cores = 6) %>% rbindlist()
+    temp_opt_N_fun[, utility := U_type]
+    temp_opt_N_fun[, insurance := I_type]
+
+    store_2[[k]] <- temp_opt_N_fun
+  }
+
+  store_1 <- rbindlist(store_2)
+  store_1[, coverage := cov_level]
+  store_1[, subsidy := sub_per]
+
+  opt_N_fun_holder[[i]] <- store_1
+}
+
+data_plot <- rbindlist(opt_N_fun_holder) %>%
+  mutate(
+    utility = as.character(utility),
+    utility = ifelse(utility == "CA1", "CA", utility),
+    utility = factor(utility, levels = c("RN", "CA", "CR"))
+  ) %>%
+  data.table() %>%
+  .[t == 20 & coverage != 0.8 & utility != "CA2", ]
+
+g_opt_N_fun <- ggplot() +
+  geom_line(data = data_plot, aes(x = APH, y = N, linetype = utility)) +
+  facet_grid(coverage ~ insurance) +
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"), name = "Utility Type") +
+  scale_y_continuous(breaks = seq(180, 205, by = 5), limits = c(180, 205)) +
+  xlab("APH (bu/acre)") +
+  ylab("Optimal nitrogen rate (lb/acre)") +
+  theme(
+    legend.position = "bottom"
+  )
+y_axis_break_add(g_opt_N_fun, breaks = seq(180, 205, by = 5))
+ggsave("figures/opt_N_functions_steady_all.pdf", width = 6, height = 6)
+
+# ===================================
+# Figure 8
+# ===================================
+#--- sourcing cpp simulation function ---#
+sourceCpp("./R_codes/profit_BI.cpp")
+
+#--- seed ---#
+set.seed(244323)
+
+#--- create lists of insurance and utility types ---#
+I_type <- "RP"
+U_type <- "RN"
+cov_level <- 0.85
+sub_per <- 0.38
+
+#--------------------------
+# marginal value breakdown
+#--------------------------
+B_bi <- 5000
+disc <- 0.04 # discount rate
+
+half_U <- rmvnorm(mean = c(0, 0), sig = sigma, n = B_bi) %>% pnorm()
+U <- rbind(half_U, 1 - half_U)
+h_price <- qlnorm(U[, 1], meanlog = ln_mean_p, sdlog = sqrt(ln_var_p))
+yield_U <- U[, 2]
+
+#--- generate APH_next mat ---#
+V_c <- VF_sim(34)
+
+V_c[APH_next <= APH_min, APH_next := APH_min]
+V_c[APH_next >= APH_max, APH_next := APH_max]
+V_c[, APH_norm := (APH_next - APH_min) / (APH_max - APH_min)]
+APH_mat <- BernBasis_fast(V_c[, APH_norm], Nk)
+
+#--- VF_path ---#
+VF_path <- readRDS(paste("./Results/VF_path_", min_y, "_", max_y, "_cov_", cov_level * 100, "_rho_", abs(rho) * 10,
+  "_sub_", sub_per * 100, "_pCorn_", p_price * 100, "_pN_", p_N * 100, ".rds",
+  sep = ""
+))
+
+#--- current profit ---#
+temp_pi_c <- eval(parse(text = paste("temp_data <- V_c[,pi_", I_type, "]", sep = "")))
+
+#--- VF ---#
+V_next <- APH_mat %*% VF_path[[9]][[30]]
+
+#--- merge ---#
+temp_data <- V_c[, .(APH_next, N)]
+temp_data[, pi_c := temp_pi_c]
+temp_data[, VF := V_next]
+
+#--- find mean by N ---#
+temp_MP <- temp_data[, .(pi_c = mean(pi_c), VF = mean(VF)), by = N]
+
+# ggplot(data=temp_MP) +
+# 	geom_line(aes(y=VF,x=N))
+
+pi_c_gam <- gam(pi_c ~ s(N, k = 5), data = temp_MP)
+VF_gam <- gam(VF ~ s(N, k = 5), data = temp_MP)
+pi_c <- predict.gam(pi_c_gam, newdata = data.table(N = search_N))
+VF <- predict.gam(VF_gam, newdata = data.table(N = search_N))
+MP_data <- data.table(
+  pi_c = pi_c,
+  VF = VF,
+  N = search_N
+) %>%
+  .[, rev_c := pi_c + N * p_N * acres] %>% # add back nitrogen cost so that you get revenue
+  .[, rev_next := c(.[, rev_c][-1], NA)] %>%
+  .[, rev_dif := rev_next - rev_c] %>%
+  .[, VF_next := c(.[, VF][-1], NA)] %>%
+  .[, VF_dif := VF_next - VF] %>%
+  .[, tot_dif := rev_dif + VF_dif / (1 + disc)] %>%
+  .[, tot_prof := pi_c + VF / (1 + disc)] %>%
+  .[, insurance := I_type] %>%
+  .[, utility := U_type]
+
+#--------------------------
+# Static vs Dynamic
+#--------------------------
+
+# col <- c('MR_t + VF_t'='red','MR_t'='blue','N price'='black')
+lt <- c("MR_t + VF_t" = "dashed", "MR_t" = "dotted", "N price" = "solid")
+g_mr <- ggplot(data = MP_data) +
+  geom_line(aes(x = N, y = tot_dif / acres / search_increment, linetype = "MR_t + VF_t"), size = 0.4) +
+  geom_line(aes(x = N, y = rev_dif / acres / search_increment, linetype = "MR_t"), size = 0.4) +
+  geom_line(data = data.table(x = search_N, y = p_N), aes(x = x, y = y, linetype = "N price"), size = 0.4) +
+  # scale_color_manual(values=col,name='',labels=expression(MR[t],MR[t]+MVF[t],np)) +
+  scale_linetype_manual(values = lt, name = "", labels = expression(MR[t], MR[t] + MVF[t], np)) +
+  scale_y_continuous(breaks = seq(0, 0.5, by = 0.1), limits = c(0, 0.5)) +
+  scale_x_continuous(breaks = seq(0, 240, by = 20)) +
+  ylab("$/acre") +
+  xlab("N (lb/acre)") +
+  theme(
+    legend.position = "bottom"
+  )
+y_axis_break_add(g_mr, breaks = seq(0, 0.5, by = 0.1))
+ggsave("figures/MR_MC_RN_85_38.pdf", width = 6, height = 3.5)
+
+# ===================================
+# Figure D.1: Approximated vs True APH
+# ===================================
+library("zoo")
+set.seed(398574895)
+N <- 180
+pN <- 3.14 - 0.0921 * sqrt(N) + 0.00603 * N
+qN <- 12.30 - 1.353 * sqrt(N) + 0.0456 * N
+Y_mean <- qbetagen(runif(10000), pN, qN, 48, 202) %>% mean()
+
+Y_0 <- rep(Y_mean, 9)
+U <- runif(50)
+Y_gen <- qbetagen(U, pN, qN, 48, 202)
+Y_true <- c(Y_0, Y_gen)
+
+#--- true APH ---#
+APH_true <- data.table(
+  APH = rollmean(Y_true, 10),
+  t = 1:50,
+  type = "True"
+)
+
+#--- approximate APH ---#
+APH_app <- vector()
+APH_app[1] <- Y_mean
+for (i in 1:length(Y_gen)) {
+  APH_app[i + 1] <- 0.9 * APH_app[i] + 0.1 * Y_gen[i]
+}
+
+APH_app <- data.table(
+  APH = APH_app[-1],
+  t = 1:50,
+  type = "Approximated"
+)
+
+data <- rbind(APH_true, APH_app)
+ggplot(data = data) +
+  geom_line(aes(x = t, y = APH, linetype = type)) +
+  ylim(100, 150) +
+  scale_color_discrete(name = "") +
+  theme(
+    legend.position = "bottom"
+  )
+ggsave("figures/true_vs_approximate_APH.pdf", width = 6, height = 3.5)
+
+# ===================================
+# Figure D.2: Optimal N path in expectation
+# ===================================
+EN_d[insurance == "RPHPE", insurance := "RP-HPE"]
+EN_d[, insurance := factor(insurance, levels = c("YP", "RP-HPE", "RP", "non"))]
+EN_d[utility == "CA2", utility := "CA"]
+EN_d[, utility := factor(utility, levels = c("RN", "CA", "CR"))]
+plot_data <- filter(EN_d, insurance != "non" & utility != "CA1" & coverage != 0.8)
+
+g_d_path <- ggplot() +
+  geom_line(data = plot_data, aes(x = t, y = N, linetype = utility)) +
+  facet_grid(coverage ~ insurance) +
+  # facet_grid(coverage~insurance) +
+  xlab("Year") +
+  ylab("Expected value of nitrogen rate (lb/acre)") +
+  scale_linetype_discrete(name = "Utility Type") +
+  scale_y_continuous(breaks = seq(150, 200, by = 10), limits = c(150, 205)) +
+  theme(
+    legend.position = "bottom"
+  )
+y_axis_break_add(g_d_path, breaks = seq(150, 200, by = 10))
+ggsave(paste("figures/path_N.pdf", sep = ""), height = 6, width = 6)
+
+
+# ===================================
+# Table (compares static and dynamic)
+# ===================================
+table_data_s <- EN_s[APH == 136 & uti_type != "CA1" & coverage != 0.80, ]
+table_data_d <- EN_d[t == 20 & utility != "CA1" & coverage != 0.80, ]
+
+cov_list <- c(0.70, 0.85, 0.90)
+cov_len <- length(cov_list)
+utility_type <- c("RN", "CA", "CR")
+uti_len <- length(utility_type)
+
+temp_mat <- matrix(0, 4, 5)
+colnames(temp_mat) <- c("Coverage Level", "No Insurance", "(YP_s,YP_d)", "(RPHPE_s,RPHPE_d)", "(RP_s,RP_d)")
+temp_mat[, 1] <- c("", "70%", "85%", "90%")
+
+table <- list()
+for (i in 1:uti_len) {
+  temp_mat[1, 1] <- utility_type[i]
+  temp_mat[1, 2:5] <- ""
+  for (j in 1:cov_len) {
+    temp_mat[j + 1, 2] <- round(table_data_s[ins_type == "non" & coverage == cov_list[j] & uti_type == utility_type[i], N_star], digits = 2)
+    temp_mat[j + 1, 3] <- paste("(",
+      round(table_data_s[ins_type == "YP" & coverage == cov_list[j] & uti_type == utility_type[i], N_star], digits = 2),
+      " , ",
+      round(table_data_d[insurance == "YP" & coverage == cov_list[j] & utility == utility_type[i], N], digits = 1),
+      ")",
+      sep = ""
+    )
+    temp_mat[j + 1, 4] <- paste("(",
+      round(table_data_s[ins_type == "RP-HPE" & coverage == cov_list[j] & uti_type == utility_type[i], N_star], digits = 2),
+      " , ",
+      round(table_data_d[insurance == "RP-HPE" & coverage == cov_list[j] & utility == utility_type[i], N], digits = 1),
+      ")",
+      sep = ""
+    )
+    temp_mat[j + 1, 5] <- paste("(",
+      round(table_data_s[ins_type == "RP" & coverage == cov_list[j] & uti_type == utility_type[i], N_star], digits = 2),
+      " , ",
+      round(table_data_d[insurance == "RP" & coverage == cov_list[j] & utility == utility_type[i], N], digits = 1),
+      ")",
+      sep = ""
+    )
+  }
+  table[[i]] <- temp_mat
+}
+
+report <- do.call(rbind, table)
+report[c(2, 4, 6, 8, 10, 12), 2] <- ""
+stargazer(report, type = "text")
+
+```
