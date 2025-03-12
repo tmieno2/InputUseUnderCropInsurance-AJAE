@@ -1,3 +1,6 @@
+#++++++++++++++++++++++++++++++++++++
+#+ Generate utility function
+#++++++++++++++++++++++++++++++++++++
 utility_gen <- function(utility_type = "RN") {
   if (utility_type == "CA1") { # CAA 1
     U <- function(x) {
@@ -23,6 +26,9 @@ utility_gen <- function(utility_type = "RN") {
   return(U)
 }
 
+#++++++++++++++++++++++++++++++++++++
+#+ Find optimal N by GAM smoothing
+#++++++++++++++++++++++++++++++++++++
 find_opt_N_by_gam <- function(data, dep_var = "value", N_seq_for_search_ls) {
   w_data <- copy(data)
   setnames(w_data, dep_var, "value")
@@ -36,26 +42,28 @@ find_opt_N_by_gam <- function(data, dep_var = "value", N_seq_for_search_ls) {
     .[e_u == max(e_u), ] %>%
     setnames(c("N", "e_u"), c("N_star", "max_eu"))
 
-
   return(pi_data)
 }
 
+#++++++++++++++++++++++++++++++++++++
+#+ Smooth premium payment and premium rate
+#++++++++++++++++++++++++++++++++++++
 smooth_premium <- function(data) {
-  #++++++++++++++++++++++++++++++++++++
-  #+ Premium
-  #++++++++++++++++++++++++++++++++++++
+  #---------------------
+  #- Premium
+  #---------------------
   premium_smooth_gam <- gam(premium ~ s(APH, k = 3), data = data)
 
-  premium_smoothed <- predict(premium_smooth_gam, data.frame(APH = data$APH)) 
+  premium_smoothed <- predict(premium_smooth_gam, data.frame(APH = data$APH))
 
   data$premium <- premium_smoothed
-  
-  #++++++++++++++++++++++++++++++++++++
-  #+ Premium rate
-  #++++++++++++++++++++++++++++++++++++
+
+  #---------------------
+  #- Premium rate
+  #---------------------
   premium_rate_smooth_gam <- gam(premium_rate ~ s(APH, k = 3), data = data)
 
-  premium_rate_smoothed <- predict(premium_smooth_gam, data.frame(APH = data$APH)) 
+  premium_rate_smoothed <- predict(premium_rate_smooth_gam, data.frame(APH = data$APH))
 
   data$premium_rate <- premium_rate_smoothed
 
@@ -111,6 +119,9 @@ expand_grid_df <- function(data_1, data_2) {
   return(expanded_data)
 }
 
+#++++++++++++++++++++++++++++++++++++
+#+ Calculate premium
+#++++++++++++++++++++++++++++++++++++
 get_premium <- function(insurance_type, APH, cov_level, subsidy_percent, price_data, ci_data, acres) {
   rate_yield <- APH
 
@@ -149,6 +160,9 @@ get_premium <- function(insurance_type, APH, cov_level, subsidy_percent, price_d
   return(premium)
 }
 
+#++++++++++++++++++++++++++++++++++++
+#+ Generate function to calculate revenue by insurance type
+#++++++++++++++++++++++++++++++++++++
 gen_revenue_function <- function(insurance_type) {
   if (insurance_type == "YP") {
     get_revenue <- function(raw_revenue, price_data, prod_data, APH, cov_level, yield, h_price) {
@@ -166,20 +180,6 @@ gen_revenue_function <- function(insurance_type) {
   return(get_revenue)
 }
 
-get_APH_Bernstein_mat <- function(data, APH_data) {
-  data_for_mat <-
-    data %>%
-    #--- bound APH_next between APH_min and APH_max ---#
-    .[APH_next <= APH_data$APH_min, APH_next := APH_data$APH_min] %>%
-    .[APH_next >= APH_data$APH_max, APH_next := APH_data$APH_max] %>%
-    #--- normalize for Bernstein basis evaluation ---#
-    .[, APH_norm := (APH_next - APH_data$APH_min) / (APH_data$APH_max - APH_data$APH_min)]
-
-  #--- evaluate APH_norm using Bernstein bases ---#
-  APH_mat <- BernBasis_fast(data_for_mat[, APH_norm], Nk)
-
-  return(APH_mat)
-}
 
 # !===========================================================
 # ! Bernstenin bases creation and regression
@@ -242,7 +242,7 @@ semi_B <- function(y, x, Nk, decrease = TRUE) {
 # !===========================================================
 # ! Backward induction
 # !===========================================================
-BI <- function(VF_T, production_data) {
+BI <- function(VF_T, production_data, APH_data) {
   #++++++++++++++++++++++++++++++++++++
   #+ Setup (Create place holders)
   #++++++++++++++++++++++++++++++++++++
@@ -264,7 +264,7 @@ BI <- function(VF_T, production_data) {
   #---------------------
   #- Find the mapping of APH to profit/utility at t = T
   #---------------------
-  VF[[1]] <- semi_B(VF_T[, max_eu], VF_T[, (APH - APH_min) / (APH_max - APH_min)], Nk, decrease = FALSE)
+  VF[[1]] <- semi_B(VF_T[, max_eu], VF_T[, (APH - APH_data$APH_min) / (APH_data$APH_max - APH_data$APH_min)], Nk, decrease = FALSE)
 
   #--------------------------
   #- Find pptimal N conditional on APH at t = T
@@ -305,11 +305,11 @@ BI <- function(VF_T, production_data) {
       data.table()
 
     #--- update value function (continuous) mapping ---#
-    VF[[s + 1]] <- semi_B(opt_N_on_APH[, max_eu], opt_N_on_APH[, (APH - APH_min) / (APH_max - APH_min)], Nk, decrease = FALSE)
+    VF[[s + 1]] <- semi_B(opt_N_on_APH[, max_eu], opt_N_on_APH[, (APH - APH_data$APH_min) / (APH_data$APH_max - APH_data$APH_min)], Nk, decrease = FALSE)
 
     #--- APH threshold ---#
     if (any(opt_N_on_APH[, N_star == 0])) {
-      APH_threshold[[s + 1]] <- max(N_star_on_APH[N_star != 0, APH])
+      APH_threshold[[s + 1]] <- max(opt_N_on_APH[N_star != 0, APH])
     } else {
       APH_threshold[[s + 1]] <- 999
     }
@@ -323,6 +323,23 @@ BI <- function(VF_T, production_data) {
   #--- return the results in the storage ---#
   return(list(VF, N_star_gam, APH_threshold))
 }
+
+
+get_APH_Bernstein_mat <- function(data, APH_data) {
+  data_for_mat <-
+    data %>%
+    #--- bound APH_next between APH_min and APH_max ---#
+    .[APH_next <= APH_data$APH_min, APH_next := APH_data$APH_min] %>%
+    .[APH_next >= APH_data$APH_max, APH_next := APH_data$APH_max] %>%
+    #--- normalize for Bernstein basis evaluation ---#
+    .[, APH_norm := (APH_next - APH_data$APH_min) / (APH_data$APH_max - APH_data$APH_min)]
+
+  #--- evaluate APH_norm using Bernstein bases ---#
+  APH_mat <- BernBasis_fast(data_for_mat[, APH_norm], Nk)
+
+  return(APH_mat)
+}
+
 
 # !===========================================================
 # ! Simulate N-APH path

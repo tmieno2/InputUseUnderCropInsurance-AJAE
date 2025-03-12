@@ -2,15 +2,36 @@
 title: Run backward induction and simulations
 ---
 
-# Set up simulations
+# Preparation
+
+## Load pacakges
 
 ```{r}
-#| include: false
-knitr::purl(
-  "code/0-setup-simulations.qmd",
-  "code/0-setup-simulations.R"
-)
-source("code/0-setup-simulations.R")
+library("dplyr")
+library("parallel")
+library("data.table")
+library("mgcv")
+library("mc2d")
+library("Rcpp")
+library("quadprog")
+```
+
+## Load functions
+
+```{r}
+#--- crop insurance parameters and functions ---#
+source("code/R/utility.R")
+
+#--- sourcing cpp simulation function ---#
+Rcpp::sourceCpp(here::here("code/R/calc_premium.cpp"))
+```
+
+## Load simulation parameters
+
+These simulation parameters are defined in **code/0-setup-simulations.qmd**.
+
+```{r}
+load("results/pacakged_parameters.RData")
 ```
 
 # Cases considered
@@ -102,14 +123,37 @@ production_data <-
     }
   ) %>%
   rbindlist() %>%
-  .[, raw_revenue := h_price * yield * prod_data$acres] %>%
-  expand_grid_df(., data.table(APH = APH_list)) %>%
-  .[, APH_next := yield / n_window + (n_window - 1) * APH / n_window]
+  .[, raw_revenue := h_price * yield * prod_data$acres]
 
 saveRDS(production_data, "results/production_data.rds")
 ```
 
-## Premium calcualtion
+## Find the optimal N rate without insurance by utility type
+
+```{r}
+profit_no_ins <-
+  readRDS("results/production_data.rds") %>%
+  .[, profit := raw_revenue - price_data$p_N * N * prod_data$acres]
+
+opt_N_no_ins <-
+  lapply(
+    utility_type_ls,
+    \(x) {
+      u_conversion <- utility_gen(utility_type = x)
+      opt_N_no_ins <-
+        copy(profit_no_ins) %>%
+        .[, utility := u_conversion(profit)] %>%
+        .[, .(utility = mean(utility)), by = N] %>%
+        find_opt_N_by_gam(., dep_var = "utility", N_data$N_seq_for_search) %>%
+        .[, utility_type := x]
+    }
+  ) %>%
+  rbindlist()
+
+saveRDS(opt_N_no_ins, "results/opt_N_no_ins.rds")
+```
+
+## Calculate premium pyament amount
 
 ```{r}
 #| eval: false
@@ -122,13 +166,13 @@ premium_data <-
   expand_grid_df(., coverage_subsidy_data) %>%
   rowwise() %>%
   dplyr::mutate(premium_ls = list(
-      get_premium(insurance_type, APH, coverage_level, subsidy_level, price_data, ci_data, prod_data$acres)
+    get_premium(insurance_type, APH, coverage_level, subsidy_level, price_data, ci_data, prod_data$acres)
   )) %>%
   dplyr::mutate(premium_data = list(
     data.table(
       premium = premium_ls$premium,
       premium_rate = premium_ls$premium_rate
-    ) 
+    )
   )) %>%
   dplyr::select(-premium_ls) %>%
   tidyr::unnest(premium_data) %>%
@@ -149,10 +193,13 @@ saveRDS(premium_data, "results/premium_data.rds")
 ```{r}
 #| eval: false
 
-production_data <- readRDS("results/production_data.rds")
-premium_data <- readRDS("results/premium_data.rds")
+production_data_slim <-
+  readRDS("results/production_data.rds") %>%
+  expand_grid_df(., data.table(APH = APH_list)) %>%
+  .[, APH_next := yield / n_window + (n_window - 1) * APH / n_window] %>%
+  .[, .(yield, h_price, N, APH, APH_next, raw_revenue)]
 
-production_data_slim <- production_data[, .(yield, h_price, N, APH, APH_next, raw_revenue)]
+premium_data <- readRDS("results/premium_data.rds")
 
 mclapply(
   1:nrow(cases),
@@ -164,7 +211,7 @@ mclapply(
     sub_per <- cases[i, subsidy_level]
     ins_type <- cases[i, insurance_type]
     util_type <- cases[i, utility_type]
-    file_name <- cases[i, conc_prod_file_name]
+    conc_prod_file_name <- cases[i, conc_prod_file_name]
 
     get_revenue <- gen_revenue_function(insurance_type = ins_type)
     u_conversion <- utility_gen(utility_type = util_type)
@@ -175,14 +222,14 @@ mclapply(
 
     N_APH_utility <-
       production_data_slim %>%
-      .[, revenue := get_revenue(raw_revenue, price_data, prod_data, APH, cov_level, yield, h_price)] %>%
+      .[, revenue_with_indemnity := get_revenue(raw_revenue, price_data, prod_data, APH, cov_level, yield, h_price)] %>%
       premium_data_slim[., on = .(APH)] %>%
       .[, N_cost := price_data$p_N * N * prod_data$acres] %>%
-      .[, profit := revenue - N_cost - premium] %>%
+      .[, profit := revenue_with_indemnity - N_cost - premium] %>%
       .[, utility := u_conversion(profit)] %>%
       .[, .(N, APH, utility, APH_next)]
 
-    saveRDS(N_APH_utility, file_name)
+    saveRDS(N_APH_utility, conc_prod_file_name)
   },
   mc.cores = min(detectCores() - 2, 6),
   mc.preschedule = FALSE
@@ -215,14 +262,14 @@ opt_N_static <-
       sub_per <- cases[i, subsidy_level]
       ins_type <- cases[i, insurance_type]
       util_type <- cases[i, utility_type]
-      file_name <- cases[i, conc_prod_file_name]
+      conc_prod_file_name <- cases[i, conc_prod_file_name]
 
       #--- profress tracker ---#
       print(paste0("Working on ", i, "/", nrow(cases)))
 
       #--- Load the concurrent production data ---#
       opt_N_data <-
-        readRDS(file_name) %>%
+        readRDS(conc_prod_file_name) %>%
         #--- average by APH, coverage level, insurance type, and N ---#
         .[, .(value = mean(utility)), by = .(APH, N)] %>%
         #--- nest by APH, coverage level, and insurance type ---#
@@ -257,17 +304,6 @@ saveRDS(opt_N_static, "results/opt_N_static.rds")
 # Solve dynamic optimization via backward induction
 
 
-## Backward induction
-
-### Generate production data
-
-The code below generate yield, APH in the next period, and profit for all the yield-price instances (defined by `yield_U` and `h_price`) at different values of N (defined by `N_seq`).
-
-APH_next is bounded by APH_min and APH_max. Otherwise, you will expand the range of APH at every single time period.
-
-
-### Backward induction
-
 ```{r}
 opt_N_static <- readRDS("results/opt_N_static.rds")
 
@@ -284,29 +320,33 @@ mclapply(
     con_prod_file_name <- cases[x, conc_prod_file_name]
     BI_results_file_name <- cases[x, BI_results_file_name]
 
-    #++++++++++++++++++++++++++++++++++++
-    #+ Load results
-    #++++++++++++++++++++++++++++++++++++
-    #--- production data ---#
-    production_data <- readRDS(con_prod_file_name)
+    if (!file.exists(BI_results_file_name)) {
+      #++++++++++++++++++++++++++++++++++++
+      #+ Load results
+      #++++++++++++++++++++++++++++++++++++
+      #--- production data ---#
+      production_data <- readRDS(con_prod_file_name)
 
-    #--- Value function at the final period ---#
-    VF_T <-
-      opt_N_static %>%
-      .[coverage_level == cov_level & insurance_type == ins_type & utility_type == util_type, .(APH, N_star, max_eu)]
+      #--- Value function at the final period ---#
+      VF_T <-
+        opt_N_static %>%
+        .[coverage_level == cov_level & insurance_type == ins_type & utility_type == util_type, .(APH, N_star, max_eu)]
 
-    #++++++++++++++++++++++++++++++++++++
-    #+ Backward induction
-    #++++++++++++++++++++++++++++++++++++
-    BI_results <- BI(VF_T, production_data)
+      #++++++++++++++++++++++++++++++++++++
+      #+ Backward induction
+      #++++++++++++++++++++++++++++++++++++
+      BI_results <- BI(VF_T, production_data, APH_data)
 
-    saveRDS(BI_results, BI_results_file_name)
+      saveRDS(BI_results, BI_results_file_name)
+    }
   },
-  mc.cores = min(detectCores() - 2, 4),
+  # mc.cores = min(detectCores() - 2, 4),
+  mc.cores = 4,
   mc.preschedule = FALSE
 )
-
 ```
+
+
 
 # Simulate Expected Path of N and APH
 
